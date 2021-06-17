@@ -11,11 +11,13 @@ from sklearn.manifold import TSNE
 from scipy.spatial import procrustes
 from scipy.spatial import Voronoi, voronoi_plot_2d
 import matplotlib.pyplot as plt
-from sklearn.cluster import MiniBatchKMeans
-from sklearn.cluster import KMeans
+from sklearn.cluster import MiniBatchKMeans, KMeans, AgglomerativeClustering, OPTICS
 import copy
+import time
 
 from spmf import Spmf
+
+import umap
 
 import subprocess
 def vmsp(input_file, output_file, min_supp):
@@ -42,7 +44,7 @@ cur_air_quality_data = {}
 cur_city_list = []
 cur_city_num = 0
 cur_date_num = 0
-cur_cluster_num = 0
+cur_cluster_num = [0,0]
 cur_global_label_patterns = []
 
 @app.route("/city_locs")
@@ -420,6 +422,26 @@ def get_air_quality_infor (space, time):
 #     print(canopy_result[0])
 #     return ""
 
+def hierarchical_clustering(data, k):
+    h_clustering = AgglomerativeClustering().fit(data)
+    labels = h_clustering.labels_
+    return labels
+
+def all_points_projection_mds(data):
+    mds = MyMDS(2)
+    point_locs_mds = mds.fit(data)
+    return point_locs_mds
+
+def all_points_projection_tsne(data):
+    tsne = TSNE(n_components=2, learning_rate=100)
+    point_locs_tsne = tsne.fit_transform(data)
+    return point_locs_tsne
+
+def all_points_projection_umap(data):
+    reducer = umap.UMAP(n_neighbors=50, min_dist=0.001)
+    embedding = reducer.fit_transform(data)
+    return embedding
+
 def kmeans(data, k):
     # mkmeans = MiniBatchKMeans(n_clusters=k, random_state = 0, batch_size = 6).fit(data)
     mkmeans = KMeans(n_clusters=k, random_state = 0).fit(data)
@@ -427,6 +449,12 @@ def kmeans(data, k):
     mkmeans.predict(data)
     labels = mkmeans.labels_
     return centers, labels
+
+def optics(data):
+    clustering = OPTICS(min_samples=13).fit(data)
+    print(clustering.labels_)
+    print(max(clustering.labels_.tolist()))
+    return clustering.labels_
 
 def st_conn_judge(tmp_dis, j, k, tmp_conn_mtx):
     # 如果该点已经被考虑过，不再重复计算
@@ -458,12 +486,14 @@ def st_conn_judge(tmp_dis, j, k, tmp_conn_mtx):
 @cross_origin()
 def get_clustering_result (var_flag, cluster_num):
     var_flag = json.loads(var_flag)
-    cluster_num_int = int(cluster_num)
+    cluster_num_list = json.loads(cluster_num)
+    cluster_num_from = cluster_num_list[0]
+    cluster_num_to = cluster_num_list[1]
     global cur_air_quality_data
     global cur_city_num
     global cur_date_num
     global cur_cluster_num
-    cur_cluster_num = cluster_num_int
+    cur_cluster_num = cluster_num_list
 
     air_quality_data = []
     pure_data = []
@@ -482,48 +512,90 @@ def get_clustering_result (var_flag, cluster_num):
             air_quality_data.append(item)
     # print(air_quality_data)
     pure_data = np.array(pure_data)
-    centers, labels = kmeans(pure_data, cluster_num_int)
-    # print(centers)
-    # print(labels)
-    for i in range(len(labels)):
-        air_quality_data[i]['label'] = int(labels[i])
+    pure_data_list = list(pure_data)
+    centers_list = []
+    labels_list = []
+    for i in range(cluster_num_from, cluster_num_to+1):
+        centers, labels = kmeans(pure_data, i)
+        center_list = list(centers)
+        label_list = list(labels)
+        centers_list.append(center_list)
+        labels_list.append(label_list)
+        pure_data_list.extend(center_list)
+
+    # 原始数据和所有的中心点
+    pure_data_and_centers = np.array(pure_data_list)
+
+    # 使用umap降维，感觉umap好像好用一点....不加其他的方法了
+    start_umap = time.time()
+    all_points_locs_umap = all_points_projection_umap(pure_data_and_centers)
+    elapsed_umap = time.time() - start_umap
+    print(elapsed_umap)
+
+    # OPTICS对参数也很敏感啊，不好用！！！
+    # start_optics = time.time()
+    # labels = optics(pure_data)
+    # elapsed_optics = time.time() - start_optics
+    # print(elapsed_optics)
+    # cluster_num_int = max(labels.tolist()) + 1
+
+    # start_mds = time.time()
+    # all_points_locs_mds = all_points_projection_mds(pure_data_and_centers)
+    # elapsed_mds = time.time() - start_mds
+    #
+    # start_tsne = time.time()
+    # all_points_locs_tsne = all_points_projection_tsne(pure_data_and_centers)
+    # elapsed_tsne = time.time() - start_tsne
+
+    # 为每条数据赋予聚类标签（数组）
+
+    for i in range(len(air_quality_data)):
+        air_quality_data[i]['label'] = []
+        for j in range(cluster_num_from, cluster_num_to+1):
+            air_quality_data[i]['label'][j] = int(labels_list[i][j])
 
     # 计算浓度和连续性
-    concentration = np.zeros([cluster_num_int])
-    continuity = np.zeros([cluster_num_int])
+    # concentration = np.zeros([cluster_num_int])
+    # continuity = np.zeros([cluster_num_int])
+    concentration = []
+    continuity = []
+    for i in range(cluster_num_from, cluster_num_to+1):
+        concentration.append(np.zeros([i]))
+        continuity.append(np.zeros([i]))
+
 
     # 相关参数：时间段分割大小、关键bin比例（隔离噪音）
     daySep = 7
     cityNum = cur_city_num
     weekNum = math.ceil(1.0 * cur_date_num / daySep)
-    # print(cur_date_num, weekNum)
-    st_distribution = np.zeros([cluster_num_int, cur_city_num, weekNum])
-    totalNum = len(air_quality_data)
-    for i in range(totalNum):
-        cluster_id = air_quality_data[i]['label']
-        city_id = math.floor(1.0 * i / cur_date_num)
-        date_id = i % cur_date_num
-        week_id = math.floor(1.0 * date_id / daySep)
-        st_distribution[cluster_id][city_id][week_id] += 1
 
-    # 计算浓度 & 构建significant分布
-    sBinNum = np.zeros(cluster_num_int)
-    sig_st_distribution = np.zeros([cluster_num_int, cur_city_num, weekNum])
-    for i in range(cluster_num_int):
-        tmp_dis = st_distribution[i].copy()
-        itemNum = np.sum(tmp_dis)
-        # pRate = math.sqrt(2 * math.log(totalNum, math.e))
-        pRate = 0.8
-        tmpItemNum = 0
-        while tmpItemNum < itemNum * pRate:
-            cur_max = np.max(tmp_dis)
-            cur_max_pos = np.unravel_index(np.argmax(tmp_dis),tmp_dis.shape)
-            sBinNum[i] += 1
-            tmpItemNum += cur_max
-            sig_st_distribution[i][cur_max_pos] = tmp_dis[cur_max_pos]
-            tmp_dis[cur_max_pos] = 0
-        concentration[i] = tmpItemNum / sBinNum[i]
-    # print(sig_st_distribution)
+    for i in range(cluster_num_from, cluster_num_to+1):
+        st_distribution = np.zeros([i, cur_city_num, weekNum])
+        totalNum = len(air_quality_data)
+        for j in range(totalNum):
+            cluster_id = air_quality_data[j]['label']
+            city_id = math.floor(1.0 * j / cur_date_num)
+            date_id = j % cur_date_num
+            week_id = math.floor(1.0 * date_id / daySep)
+            st_distribution[cluster_id][city_id][week_id] += 1
+
+        # 计算浓度 & 构建significant分布
+        sBinNum = np.zeros(i)
+        sig_st_distribution = np.zeros([i, cur_city_num, weekNum])
+        for j in range(i):
+            tmp_dis = st_distribution[j].copy()
+            itemNum = np.sum(tmp_dis)
+            # pRate = math.sqrt(2 * math.log(totalNum, math.e))
+            pRate = 0.8
+            tmpItemNum = 0
+            while tmpItemNum < itemNum * pRate:
+                cur_max = np.max(tmp_dis)
+                cur_max_pos = np.unravel_index(np.argmax(tmp_dis),tmp_dis.shape)
+                sBinNum[j] += 1
+                tmpItemNum += cur_max
+                sig_st_distribution[j][cur_max_pos] = tmp_dis[cur_max_pos]
+                tmp_dis[cur_max_pos] = 0
+            concentration[j] = tmpItemNum / sBinNum[j]
 
     # 计算连续性
     # 构建城市的地理坐标列表
@@ -546,7 +618,7 @@ def get_clustering_result (var_flag, cluster_num):
     # print(mds_city_locs)
     sel_city_locs = []
     for i in range(len(cur_city_locs)):
-        sel_city_locs.append({'city': cur_city_locs[i]['name'], 'real_loc': points[i].tolist(), 'tsne_loc': str(tsne_city_locs[i][0]), 'mds_loc': str(mds_city_locs[i][0])})
+        sel_city_locs.append({'city': cur_city_locs[i]['name'], 'real_loc': points[i].tolist(), 'tsne_loc': str(tsne_city_locs[i][0]), 'mds_loc': str(mds_city_locs[i][0]) })
     # print(tsne_city_locs)
     # print(sel_city_locs)
 
@@ -563,18 +635,19 @@ def get_clustering_result (var_flag, cluster_num):
         space_conn_mtx[item[1]][item[0]] = 1
     # print(space_conn_mtx)
 
-    for i in range(cluster_num_int):
-        tmp_dis = sig_st_distribution[i].copy()
-        conn_region_num = 0
-        for j in range(tmp_dis.shape[0]):
-            for k in range(tmp_dis.shape[1]):
-                if tmp_dis[j][k] == 0:
-                    continue
-                tmp_conn_mtx = space_conn_mtx.copy()
-                st_conn_judge(tmp_dis, j, k, tmp_conn_mtx)
-                conn_region_num += 1
-        # print(conn_region_num, sBinNum[i])
-        continuity[i] = 1.0 - 1.0 * conn_region_num / sBinNum[i]
+    for cNum in range(cluster_num_from, cluster_num_to+1):
+        for i in range(cNum):
+            tmp_dis = sig_st_distribution[i].copy()
+            conn_region_num = 0
+            for j in range(tmp_dis.shape[0]):
+                for k in range(tmp_dis.shape[1]):
+                    if tmp_dis[j][k] == 0:
+                        continue
+                    tmp_conn_mtx = space_conn_mtx.copy()
+                    st_conn_judge(tmp_dis, j, k, tmp_conn_mtx)
+                    conn_region_num += 1
+            # print(conn_region_num, sBinNum[i])
+            continuity[i] = 1.0 - 1.0 * conn_region_num / sBinNum[i]
 
     iaqi_bin_num = 64
     iaqi_distribution = np.zeros([cluster_num_int, var_num, iaqi_bin_num])
@@ -596,7 +669,13 @@ def get_clustering_result (var_flag, cluster_num):
     # print(iaqi_distribution)
     # print(iaqi_distribution.sum(axis=2))
 
-    clustering_result = {'cluster_info': {'centers':centers.tolist(), 'label_num': label_num, 'iaqi_distribution': iaqi_distribution.tolist(), 'iaqi_max': iaqi_max.tolist(), 'concentration': concentration.tolist(), 'continuity': continuity.tolist()}, 'data': air_quality_data, 'st_distribution': st_distribution.tolist(), 'tsne_city_locs': sel_city_locs}
+    # clustering_result = {'cluster_info': {'centers':centers.tolist(), 'label_num': label_num, 'iaqi_distribution': iaqi_distribution.tolist(), 'iaqi_max': iaqi_max.tolist(), 'concentration': concentration.tolist(), 'continuity': continuity.tolist()}, 'data': air_quality_data, 'st_distribution': st_distribution.tolist(), 'tsne_city_locs': sel_city_locs, 'tsne_point_locs': all_points_locs_tsne.tolist(), 'mds_point_locs': all_points_locs_mds.tolist(), 'umap_point_locs': all_points_locs_umap.tolist()}
+    clustering_result = {'cluster_info': {'centers': centers.tolist(), 'label_num': label_num,
+                                          'iaqi_distribution': iaqi_distribution.tolist(),
+                                          'iaqi_max': iaqi_max.tolist(), 'concentration': concentration.tolist(),
+                                          'continuity': continuity.tolist()}, 'data': air_quality_data,
+                         'st_distribution': st_distribution.tolist(), 'tsne_city_locs': sel_city_locs,
+                         'umap_point_locs': all_points_locs_umap.tolist()}
     return clustering_result
 
 def findSubSeq (Seq, subSeq):
