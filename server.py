@@ -487,8 +487,9 @@ def st_conn_judge(tmp_dis, j, k, tmp_conn_mtx):
 def get_clustering_result (var_flag, cluster_num):
     var_flag = json.loads(var_flag)
     cluster_num_list = json.loads(cluster_num)
-    cluster_num_from = cluster_num_list[0]
-    cluster_num_to = cluster_num_list[1]
+    # print(cluster_num_list)
+    cluster_num_from = cluster_num_list['from']
+    cluster_num_to = cluster_num_list['to']
     global cur_air_quality_data
     global cur_city_num
     global cur_date_num
@@ -552,17 +553,19 @@ def get_clustering_result (var_flag, cluster_num):
     for i in range(len(air_quality_data)):
         air_quality_data[i]['label'] = []
         for j in range(cluster_num_from, cluster_num_to+1):
-            air_quality_data[i]['label'][j] = int(labels_list[i][j])
+            air_quality_data[i]['label'].append(int(labels_list[j-cluster_num_from][i]))
 
     # 计算浓度和连续性
     # concentration = np.zeros([cluster_num_int])
     # continuity = np.zeros([cluster_num_int])
     concentration = []
     continuity = []
+    iaqi_bin_num = 64
+    iaqi_distribution = []
     for i in range(cluster_num_from, cluster_num_to+1):
         concentration.append(np.zeros([i]))
         continuity.append(np.zeros([i]))
-
+        iaqi_distribution.append(np.zeros([i, var_num, iaqi_bin_num]))
 
     # 相关参数：时间段分割大小、关键bin比例（隔离噪音）
     daySep = 7
@@ -573,7 +576,7 @@ def get_clustering_result (var_flag, cluster_num):
         st_distribution = np.zeros([i, cur_city_num, weekNum])
         totalNum = len(air_quality_data)
         for j in range(totalNum):
-            cluster_id = air_quality_data[j]['label']
+            cluster_id = air_quality_data[j]['label'][i-cluster_num_from]
             city_id = math.floor(1.0 * j / cur_date_num)
             date_id = j % cur_date_num
             week_id = math.floor(1.0 * date_id / daySep)
@@ -595,7 +598,7 @@ def get_clustering_result (var_flag, cluster_num):
                 tmpItemNum += cur_max
                 sig_st_distribution[j][cur_max_pos] = tmp_dis[cur_max_pos]
                 tmp_dis[cur_max_pos] = 0
-            concentration[j] = tmpItemNum / sBinNum[j]
+            concentration[i-cluster_num_from][j] = tmpItemNum / sBinNum[j]
 
     # 计算连续性
     # 构建城市的地理坐标列表
@@ -636,6 +639,7 @@ def get_clustering_result (var_flag, cluster_num):
     # print(space_conn_mtx)
 
     for cNum in range(cluster_num_from, cluster_num_to+1):
+        # 计算连续性
         for i in range(cNum):
             tmp_dis = sig_st_distribution[i].copy()
             conn_region_num = 0
@@ -647,24 +651,23 @@ def get_clustering_result (var_flag, cluster_num):
                     st_conn_judge(tmp_dis, j, k, tmp_conn_mtx)
                     conn_region_num += 1
             # print(conn_region_num, sBinNum[i])
-            continuity[i] = 1.0 - 1.0 * conn_region_num / sBinNum[i]
+            continuity[cNum-cluster_num_from][i] = 1.0 - 1.0 * conn_region_num / sBinNum[i]
 
-    iaqi_bin_num = 64
-    iaqi_distribution = np.zeros([cluster_num_int, var_num, iaqi_bin_num])
-    iaqi_max = np.zeros([cluster_num_int, var_num])
-    bin_range = 1.0 * 500 / iaqi_bin_num
-    for item in air_quality_data:
-        tmp_clsuter_id = item['label']
-        for i in range(len(item['value'])):
-            if item['value'][i] > iaqi_max[tmp_clsuter_id][i]:
-                iaqi_max[tmp_clsuter_id][i] = item['value'][i]
-            bin_id = math.floor(item['value'][i] / bin_range)
-            if bin_id == iaqi_bin_num:
-                bin_id = iaqi_bin_num - 1
-            iaqi_distribution[tmp_clsuter_id][i][bin_id] += 1
-    label_num = st_distribution.sum(axis=(1,2)).tolist()
-    for i in range(cluster_num_int):
-        iaqi_distribution[i] = iaqi_distribution[i] / label_num[i]
+        # 构建iaqi分布
+        iaqi_max = np.zeros([cNum, var_num])
+        bin_range = 1.0 * 500 / iaqi_bin_num
+        for item in air_quality_data:
+            tmp_clsuter_id = item['label']
+            for i in range(len(item['value'])):
+                if item['value'][i] > iaqi_max[tmp_clsuter_id][i]:
+                    iaqi_max[tmp_clsuter_id][i] = item['value'][i]
+                bin_id = math.floor(item['value'][i] / bin_range)
+                if bin_id == iaqi_bin_num:
+                    bin_id = iaqi_bin_num - 1
+                iaqi_distribution[cNum-cluster_num_from][tmp_clsuter_id][i][bin_id] += 1
+        label_num = st_distribution.sum(axis=(1,2)).tolist()
+        for i in range(cNum):
+            iaqi_distribution[cNum-cluster_num_from][i] = iaqi_distribution[cNum-cluster_num_from][i] / label_num[i]
 
     # print(iaqi_distribution)
     # print(iaqi_distribution.sum(axis=2))
